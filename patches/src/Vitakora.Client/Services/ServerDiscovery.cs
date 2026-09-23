@@ -71,7 +71,7 @@ public static class ServerDiscovery
             using var response = await http.GetAsync(baseUrl.TrimEnd('/') + "/health", cancellationToken);
             if (!response.IsSuccessStatusCode) return false;
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
-            return body.Contains(""product":"Vitakora"", StringComparison.OrdinalIgnoreCase);
+            return body.Contains("\"product\":\"Vitakora\"", StringComparison.OrdinalIgnoreCase);
         }
         catch
         {
