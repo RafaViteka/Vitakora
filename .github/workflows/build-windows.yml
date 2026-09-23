@@ -51,9 +51,169 @@ jobs:
           }
 
           $mainWindow = "$env:GITHUB_WORKSPACE\source\src\Vitakora.Client\MainWindow.xaml.cs"
-          $mainText = Get-Content $mainWindow -Raw
-          $mainText = $mainText.Replace('const string ServerUrl="https://localhost:5001";', 'const string ServerUrl="http://localhost:5000";')
-          Set-Content $mainWindow $mainText -NoNewline
+          @'
+          using System.IO;
+          using System.Windows;
+          using System.Windows.Controls;
+          using Vitakora.Client.Services;
+          using Vitakora.Shared;
+
+          namespace Vitakora.Client;
+
+          public partial class MainWindow : Window
+          {
+              readonly ChatConnection _chat = new();
+              ApiClient? _api;
+              LoginResponse? _login;
+              string _serverUrl = "http://localhost:5000";
+              string ConfigFile => Path.Combine(
+                  Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                  "Vitakora", "server.txt");
+
+              public MainWindow()
+              {
+                  InitializeComponent();
+                  PresenceBox.ItemsSource = Enum.GetValues<PresenceStatus>();
+                  PresenceBox.SelectedItem = PresenceStatus.Available;
+
+                  try
+                  {
+                      Directory.CreateDirectory(Path.GetDirectoryName(ConfigFile)!);
+                      if (File.Exists(ConfigFile))
+                      {
+                          var saved = File.ReadAllText(ConfigFile).Trim();
+                          if (!string.IsNullOrWhiteSpace(saved)) _serverUrl = NormalizeServer(saved);
+                      }
+                  }
+                  catch { }
+
+                  ServerBox.Text = _serverUrl;
+                  Loaded += async (_, _) => await LoadServerAsync();
+
+                  _chat.MessageReceived += m => Dispatcher.Invoke(async () =>
+                  {
+                      MessagesList.Items.Add($"{m.SenderName}: {m.Text}");
+                      await _chat.MarkDeliveredAsync(m.Id);
+                      if (IsActive) await _chat.MarkReadAsync(m.Id);
+                      ShowPopup(m);
+                  });
+
+                  _chat.SessionRevoked += reason => Dispatcher.Invoke(() =>
+                  {
+                      StatusText.Text = reason;
+                      _login = null;
+                      RecipientBox.ItemsSource = null;
+                  });
+              }
+
+              static string NormalizeServer(string value)
+              {
+                  value = value.Trim().TrimEnd('/');
+                  if (!value.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
+                      !value.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                      value = "http://" + value;
+                  if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
+                      throw new InvalidOperationException("Dirección de servidor no válida.");
+                  if (uri.IsDefaultPort) value = value + ":5000";
+                  return value;
+              }
+
+              async Task LoadServerAsync()
+              {
+                  try
+                  {
+                      _serverUrl = NormalizeServer(ServerBox.Text);
+                      ServerBox.Text = _serverUrl;
+                      File.WriteAllText(ConfigFile, _serverUrl);
+                      _api = new ApiClient(_serverUrl);
+                      StatusText.Text = "Conectando con el servidor...";
+                      WorkstationBox.ItemsSource = await _api.GetWorkstationsAsync();
+                      WorkstationBox.SelectedIndex = 0;
+                      StatusText.Text = "Servidor disponible.";
+                  }
+                  catch (Exception ex)
+                  {
+                      WorkstationBox.ItemsSource = null;
+                      StatusText.Text = $"Servidor no disponible: {ex.Message}";
+                  }
+              }
+
+              async void Server_Click(object s, RoutedEventArgs e) => await LoadServerAsync();
+
+              async void Login_Click(object s, RoutedEventArgs e)
+              {
+                  if (_api is null)
+                  {
+                      await LoadServerAsync();
+                      if (_api is null) return;
+                  }
+                  if (WorkstationBox.SelectedItem is not WorkstationDto ws) return;
+                  try
+                  {
+                      _login = await _api.LoginAsync(new LoginRequest(UsernameBox.Text, PasswordBox.Password, ws.Id));
+                      if (_login is null)
+                      {
+                          StatusText.Text = "Credenciales no válidas.";
+                          return;
+                      }
+                      await _chat.ConnectAsync(_serverUrl, _login.AccessToken);
+                      RecipientBox.ItemsSource = await _api.GetDirectoryAsync(_login.AccessToken);
+                      RecipientBox.SelectedIndex = 0;
+                      StatusText.Text = $"Conectado como {_login.DisplayName}";
+                  }
+                  catch (Exception ex)
+                  {
+                      StatusText.Text = ex.Message;
+                  }
+              }
+
+              async void Send_Click(object s, RoutedEventArgs e)
+              {
+                  if (_login is null || RecipientBox.SelectedItem is not DirectoryItemDto target ||
+                      string.IsNullOrWhiteSpace(MessageBox.Text)) return;
+                  var text = MessageBox.Text.Trim();
+                  await _chat.SendAsync(new SendMessageRequest(target.Kind, target.Id, text));
+                  MessagesList.Items.Add($"Yo → {target.Name}: {text}");
+                  MessageBox.Clear();
+              }
+
+              async void PresenceBox_SelectionChanged(object s, SelectionChangedEventArgs e)
+              {
+                  if (_login is not null && PresenceBox.SelectedItem is PresenceStatus p)
+                      await _chat.SetPresenceAsync(p);
+              }
+
+              void ShowPopup(MessageDto m)
+              {
+                  var p = new PopupWindow(m.SenderName, m.Text);
+                  p.ReplyRequested += async text =>
+                      await _chat.SendAsync(new SendMessageRequest(RecipientKind.User, m.SenderUserId, text));
+                  p.Show();
+              }
+          }
+          '@ | Set-Content $mainWindow -NoNewline
+
+          $mainXaml = "$env:GITHUB_WORKSPACE\source\src\Vitakora.Client\MainWindow.xaml"
+          @'
+          <Window x:Class="Vitakora.Client.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Title="Vitakora" Width="980" Height="680" MinWidth="760" MinHeight="520" WindowStartupLocation="CenterScreen" Background="{StaticResource Background}">
+          <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="280"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <Border Background="#202123" Padding="18"><StackPanel>
+          <TextBlock Text="Vitakora" Foreground="White" FontSize="26" FontWeight="SemiBold" Margin="0,0,0,22"/>
+          <TextBlock Text="Servidor" Foreground="#B8B8BD"/>
+          <DockPanel Margin="0,6,0,12"><Button DockPanel.Dock="Right" Content="Conectar" Width="78" Margin="6,0,0,0" Click="Server_Click"/><TextBox x:Name="ServerBox" Height="34" VerticalContentAlignment="Center"/></DockPanel>
+          <TextBlock Text="Usuario" Foreground="#B8B8BD"/><TextBox x:Name="UsernameBox" Margin="0,6,0,12" Height="34"/>
+          <TextBlock Text="Contraseña" Foreground="#B8B8BD"/><PasswordBox x:Name="PasswordBox" Margin="0,6,0,12" Height="34"/>
+          <TextBlock Text="Puesto" Foreground="#B8B8BD"/><ComboBox x:Name="WorkstationBox" DisplayMemberPath="Name" Margin="0,6,0,12" Height="34"/>
+          <Button Content="Entrar" Height="38" Click="Login_Click"/>
+          <TextBlock x:Name="StatusText" Foreground="#D9D9E3" TextWrapping="Wrap" Margin="0,16,0,0"/>
+          </StackPanel></Border>
+          <Grid Grid.Column="1" Margin="24"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <DockPanel Margin="0,0,0,14"><TextBlock Text="Chat" FontSize="24" FontWeight="SemiBold"/><ComboBox x:Name="PresenceBox" Width="160" HorizontalAlignment="Right" DockPanel.Dock="Right" SelectionChanged="PresenceBox_SelectionChanged"/></DockPanel>
+          <ListBox x:Name="MessagesList" Grid.Row="1" BorderThickness="0" Background="Transparent"/>
+          <Grid Grid.Row="2" Margin="0,14,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="210"/><ColumnDefinition Width="*"/><ColumnDefinition Width="90"/></Grid.ColumnDefinitions>
+          <ComboBox x:Name="RecipientBox" DisplayMemberPath="Name"/><TextBox x:Name="MessageBox" Grid.Column="1" Margin="8,0" Height="42" VerticalContentAlignment="Center"/><Button Grid.Column="2" Content="Enviar" Click="Send_Click"/>
+          </Grid></Grid></Grid></Window>
+          '@ | Set-Content $mainXaml -NoNewline
 
           $program = "$env:GITHUB_WORKSPACE\source\src\Vitakora.Server\Program.cs"
           @'
@@ -226,23 +386,22 @@ jobs:
             -p:DebugSymbols=false `
             -o ../out/server
 
-      - name: Build installer
+      - name: Build installers
         shell: pwsh
         run: |
           choco install innosetup -y --no-progress
-
           New-Item -ItemType Directory -Force installer | Out-Null
+
           @'
           [Setup]
-          AppId={{8D271D75-7491-4A3C-8D4D-9FDC2B489A33}
-          AppName=Vitakora
-          AppVersion=0.1.0
+          AppId={{4F48A2E6-EC23-4B54-B1E2-90F7C174E858}
+          AppName=Vitakora Servidor
+          AppVersion=0.2.0
           AppPublisher=Viteka
           DefaultDirName={autopf}\Vitakora
           DefaultGroupName=Vitakora
-          UninstallDisplayIcon={app}\Client\Vitakora.Client.exe
           OutputDir=..\out
-          OutputBaseFilename=Vitakora-Setup
+          OutputBaseFilename=Vitakora-Servidor-Setup
           Compression=lzma2
           SolidCompression=yes
           WizardStyle=modern
@@ -254,14 +413,15 @@ jobs:
           Name: "{commonappdata}\Vitakora"; Permissions: users-modify
 
           [Files]
-          Source: "..\out\client\*"; DestDir: "{app}\Client"; Flags: ignoreversion recursesubdirs createallsubdirs
           Source: "..\out\server\*"; DestDir: "{app}\Server"; Flags: ignoreversion recursesubdirs createallsubdirs
+          Source: "..\out\client\*"; DestDir: "{app}\Client"; Flags: ignoreversion recursesubdirs createallsubdirs
 
           [Icons]
           Name: "{autodesktop}\Vitakora"; Filename: "{app}\Client\Vitakora.Client.exe"
           Name: "{group}\Vitakora"; Filename: "{app}\Client\Vitakora.Client.exe"
 
           [Run]
+          Filename: "{cmd}"; Parameters: "/C echo http://localhost:5000>""{commonappdata}\Vitakora\server.txt"""; Flags: runhidden waituntilterminated
           Filename: "{cmd}"; Parameters: "/C netsh advfirewall firewall delete rule name=""Vitakora Server"" >nul 2>&1 & netsh advfirewall firewall add rule name=""Vitakora Server"" dir=in action=allow protocol=TCP localport=5000"; Flags: runhidden waituntilterminated
           Filename: "{cmd}"; Parameters: "/C schtasks /Delete /TN ""Vitakora Server"" /F >nul 2>&1"; Flags: runhidden waituntilterminated
           Filename: "{cmd}"; Parameters: "/C schtasks /Create /TN ""Vitakora Server"" /TR """"""{app}\Server\Vitakora.Server.exe"""""" /SC ONSTART /RU SYSTEM /RL HIGHEST /F"; Flags: runhidden waituntilterminated
@@ -270,9 +430,41 @@ jobs:
 
           [UninstallRun]
           Filename: "{cmd}"; Parameters: "/C schtasks /End /TN ""Vitakora Server"" >nul 2>&1 & schtasks /Delete /TN ""Vitakora Server"" /F >nul 2>&1 & netsh advfirewall firewall delete rule name=""Vitakora Server"" >nul 2>&1"; Flags: runhidden waituntilterminated
-          '@ | Set-Content installer\Vitakora.iss -NoNewline
+          '@ | Set-Content installer\Server.iss -NoNewline
 
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Vitakora.iss
+          @'
+          [Setup]
+          AppId={{9259584C-6413-44CD-806C-7132E59BB1B6}
+          AppName=Vitakora Cliente
+          AppVersion=0.2.0
+          AppPublisher=Viteka
+          DefaultDirName={autopf}\Vitakora Cliente
+          DefaultGroupName=Vitakora
+          OutputDir=..\out
+          OutputBaseFilename=Vitakora-Cliente-Setup
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+          PrivilegesRequired=admin
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+
+          [Dirs]
+          Name: "{commonappdata}\Vitakora"; Permissions: users-modify
+
+          [Files]
+          Source: "..\out\client\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{autodesktop}\Vitakora"; Filename: "{app}\Vitakora.Client.exe"
+          Name: "{group}\Vitakora"; Filename: "{app}\Vitakora.Client.exe"
+
+          [Run]
+          Filename: "{app}\Vitakora.Client.exe"; Description: "Abrir Vitakora"; Flags: nowait postinstall skipifsilent
+          '@ | Set-Content installer\Client.iss -NoNewline
+
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Server.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Client.iss
 
       - name: Package portable builds
         shell: pwsh
@@ -280,11 +472,18 @@ jobs:
           Compress-Archive -Path out/client/* -DestinationPath out/Vitakora-Client-win-x64.zip -Force
           Compress-Archive -Path out/server/* -DestinationPath out/Vitakora-Server-win-x64.zip -Force
 
-      - name: Upload installer
+      - name: Upload server installer
         uses: actions/upload-artifact@v4
         with:
-          name: Vitakora-Setup
-          path: out/Vitakora-Setup.exe
+          name: Vitakora-Servidor-Setup
+          path: out/Vitakora-Servidor-Setup.exe
+          if-no-files-found: error
+
+      - name: Upload client installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vitakora-Cliente-Setup
+          path: out/Vitakora-Cliente-Setup.exe
           if-no-files-found: error
 
       - name: Upload portable builds
