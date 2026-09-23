@@ -27,6 +27,21 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\source" | Out-Null
           Expand-Archive "$env:RUNNER_TEMP\vitakora-source.zip" "$env:GITHUB_WORKSPACE\source" -Force
 
+      - name: Apply build fixes
+        shell: pwsh
+        run: |
+          $api = "$env:GITHUB_WORKSPACE\source\src\Vitakora.Client\Services\ApiClient.cs"
+          $apiText = Get-Content $api -Raw
+          if ($apiText -notmatch 'using System.Net.Http;') {
+            Set-Content $api ("using System.Net.Http;`r`n" + $apiText) -NoNewline
+          }
+
+          $program = "$env:GITHUB_WORKSPACE\source\src\Vitakora.Server\Program.cs"
+          $programText = Get-Content $program -Raw
+          if ($programText -notmatch 'using Microsoft.AspNetCore.SignalR;') {
+            Set-Content $program ("using Microsoft.AspNetCore.SignalR;`r`n" + $programText) -NoNewline
+          }
+
       - name: Install .NET 10 SDK
         uses: actions/setup-dotnet@v4
         with:
