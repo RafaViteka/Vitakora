@@ -4,8 +4,6 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
 
 permissions:
   contents: read
@@ -27,20 +25,165 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\source" | Out-Null
           Expand-Archive "$env:RUNNER_TEMP\vitakora-source.zip" "$env:GITHUB_WORKSPACE\source" -Force
 
-      - name: Apply build fixes
+      - name: Convert test build to standalone SQLite
         shell: pwsh
         run: |
+          $props = "$env:GITHUB_WORKSPACE\source\Directory.Packages.props"
+          $propsText = Get-Content $props -Raw
+          if ($propsText -notmatch 'Microsoft.EntityFrameworkCore.Sqlite') {
+            $propsText = $propsText.Replace(
+              '<PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.12" />',
+              '<PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.12" />' + [Environment]::NewLine + '    <PackageVersion Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.12" />'
+            )
+            Set-Content $props $propsText -NoNewline
+          }
+
+          $serverProj = "$env:GITHUB_WORKSPACE\source\src\Vitakora.Server\Vitakora.Server.csproj"
+          $serverProjText = Get-Content $serverProj -Raw
+          $serverProjText = $serverProjText.Replace('<Project Sdk="Microsoft.NET.Sdk.Web">', '<Project Sdk="Microsoft.NET.Sdk.Web">' + [Environment]::NewLine + '  <PropertyGroup><OutputType>WinExe</OutputType></PropertyGroup>')
+          $serverProjText = $serverProjText.Replace('<PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" />', '<PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" />')
+          Set-Content $serverProj $serverProjText -NoNewline
+
           $api = "$env:GITHUB_WORKSPACE\source\src\Vitakora.Client\Services\ApiClient.cs"
           $apiText = Get-Content $api -Raw
           if ($apiText -notmatch 'using System.Net.Http;') {
-            Set-Content $api ("using System.Net.Http;`r`n" + $apiText) -NoNewline
+            Set-Content $api ("using System.Net.Http;" + [Environment]::NewLine + $apiText) -NoNewline
           }
 
+          $mainWindow = "$env:GITHUB_WORKSPACE\source\src\Vitakora.Client\MainWindow.xaml.cs"
+          $mainText = Get-Content $mainWindow -Raw
+          $mainText = $mainText.Replace('const string ServerUrl="https://localhost:5001";', 'const string ServerUrl="http://localhost:5000";')
+          Set-Content $mainWindow $mainText -NoNewline
+
           $program = "$env:GITHUB_WORKSPACE\source\src\Vitakora.Server\Program.cs"
-          $programText = Get-Content $program -Raw
-          if ($programText -notmatch 'using Microsoft.AspNetCore.SignalR;') {
-            Set-Content $program ("using Microsoft.AspNetCore.SignalR;`r`n" + $programText) -NoNewline
+          @'
+          using System.Text;
+          using Microsoft.AspNetCore.Authentication.JwtBearer;
+          using Microsoft.AspNetCore.Identity;
+          using Microsoft.AspNetCore.SignalR;
+          using Microsoft.EntityFrameworkCore;
+          using Microsoft.IdentityModel.Tokens;
+          using Vitakora.Server.Data;
+          using Vitakora.Server.Hubs;
+          using Vitakora.Server.Options;
+          using Vitakora.Server.Services;
+          using Vitakora.Shared;
+
+          Directory.SetCurrentDirectory(AppContext.BaseDirectory);
+
+          var builder = WebApplication.CreateBuilder(args);
+          builder.WebHost.UseUrls("http://0.0.0.0:5000");
+
+          builder.Services.Configure<VitakoraOptions>(builder.Configuration.GetSection("Vitakora"));
+          builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection("Jwt"));
+
+          var dataDir = Path.Combine(
+              Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+              "Vitakora");
+          Directory.CreateDirectory(dataDir);
+          var dbPath = Path.Combine(dataDir, "vitakora.db");
+
+          builder.Services.AddDbContext<VitakoraDbContext>(o => o.UseSqlite($"Data Source={dbPath}"));
+          builder.Services.AddSignalR(o => o.AddFilter<SessionHubFilter>());
+          builder.Services.AddScoped<SessionHubFilter>();
+          builder.Services.AddScoped<AuthService>();
+          builder.Services.AddSingleton<TokenService>();
+          builder.Services.AddSingleton<ConnectionRegistry>();
+
+          var jwt = builder.Configuration.GetSection("Jwt").Get<JwtOptions>()!;
+          builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+              .AddJwtBearer(o =>
+              {
+                  o.TokenValidationParameters = new TokenValidationParameters
+                  {
+                      ValidateIssuer = true,
+                      ValidIssuer = jwt.Issuer,
+                      ValidateAudience = true,
+                      ValidAudience = jwt.Audience,
+                      ValidateIssuerSigningKey = true,
+                      IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt.Key)),
+                      ValidateLifetime = true,
+                      ClockSkew = TimeSpan.FromSeconds(30)
+                  };
+                  o.Events = new JwtBearerEvents
+                  {
+                      OnMessageReceived = ctx =>
+                      {
+                          var token = ctx.Request.Query["access_token"];
+                          if (!string.IsNullOrEmpty(token) &&
+                              ctx.HttpContext.Request.Path.StartsWithSegments("/hubs/chat"))
+                              ctx.Token = token;
+                          return Task.CompletedTask;
+                      }
+                  };
+              });
+
+          builder.Services.AddAuthorization();
+
+          var app = builder.Build();
+          app.UseAuthentication();
+          app.UseMiddleware<SessionValidationMiddleware>();
+          app.UseAuthorization();
+
+          app.MapGet("/health", () => Results.Ok(new
+          {
+              status = "ok",
+              product = "Vitakora",
+              database = dbPath,
+              utc = DateTimeOffset.UtcNow
+          }));
+
+          app.MapGet("/api/workstations", async (VitakoraDbContext db) =>
+              await db.Workstations.Where(x => x.IsActive).OrderBy(x => x.Name)
+                  .Select(x => new WorkstationDto(x.Id, x.Name)).ToListAsync());
+
+          app.MapPost("/api/auth/login", async (LoginRequest req, AuthService auth, CancellationToken ct) =>
+          {
+              var r = await auth.LoginAsync(req, ct);
+              return r is null ? Results.Unauthorized() : Results.Ok(r);
+          });
+
+          app.MapGet("/api/directory", async (VitakoraDbContext db) =>
+          {
+              var users = await db.Users.Where(x => x.IsActive)
+                  .Select(x => new DirectoryItemDto(x.Id, x.DisplayName, RecipientKind.User)).ToListAsync();
+              var workstations = await db.Workstations.Where(x => x.IsActive)
+                  .Select(x => new DirectoryItemDto(x.Id, x.Name, RecipientKind.Workstation)).ToListAsync();
+              var groups = await db.Groups.Where(x => x.IsActive)
+                  .Select(x => new DirectoryItemDto(x.Id, x.Name, RecipientKind.Group)).ToListAsync();
+              return users.Concat(workstations).Concat(groups).OrderBy(x => x.Kind).ThenBy(x => x.Name);
+          }).RequireAuthorization();
+
+          app.MapHub<ChatHub>("/hubs/chat");
+
+          await SeedAsync(app.Services);
+          app.Run();
+
+          static async Task SeedAsync(IServiceProvider sp)
+          {
+              using var scope = sp.CreateScope();
+              var db = scope.ServiceProvider.GetRequiredService<VitakoraDbContext>();
+              await db.Database.EnsureCreatedAsync();
+
+              if (!await db.Workstations.AnyAsync())
+                  db.Workstations.Add(new Workstation { Name = "PUESTO-01" });
+
+              if (!await db.Users.AnyAsync())
+              {
+                  var user = new AppUser
+                  {
+                      Username = "master",
+                      DisplayName = "Master Vitakora",
+                      Role = UserRole.Master
+                  };
+                  user.PasswordHash = new PasswordHasher<AppUser>()
+                      .HashPassword(user, "Vitakora2026!");
+                  db.Users.Add(user);
+              }
+
+              await db.SaveChangesAsync();
           }
+          '@ | Set-Content $program -NoNewline
 
       - name: Install .NET 10 SDK
         uses: actions/setup-dotnet@v4
@@ -83,22 +226,72 @@ jobs:
             -p:DebugSymbols=false `
             -o ../out/server
 
-      - name: Package
+      - name: Build installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+
+          New-Item -ItemType Directory -Force installer | Out-Null
+          @'
+          [Setup]
+          AppId={{8D271D75-7491-4A3C-8D4D-9FDC2B489A33}
+          AppName=Vitakora
+          AppVersion=0.1.0
+          AppPublisher=Viteka
+          DefaultDirName={autopf}\Vitakora
+          DefaultGroupName=Vitakora
+          UninstallDisplayIcon={app}\Client\Vitakora.Client.exe
+          OutputDir=..\out
+          OutputBaseFilename=Vitakora-Setup
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+          PrivilegesRequired=admin
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+
+          [Dirs]
+          Name: "{commonappdata}\Vitakora"; Permissions: users-modify
+
+          [Files]
+          Source: "..\out\client\*"; DestDir: "{app}\Client"; Flags: ignoreversion recursesubdirs createallsubdirs
+          Source: "..\out\server\*"; DestDir: "{app}\Server"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+          [Icons]
+          Name: "{autodesktop}\Vitakora"; Filename: "{app}\Client\Vitakora.Client.exe"
+          Name: "{group}\Vitakora"; Filename: "{app}\Client\Vitakora.Client.exe"
+
+          [Run]
+          Filename: "{cmd}"; Parameters: "/C netsh advfirewall firewall delete rule name=""Vitakora Server"" >nul 2>&1 & netsh advfirewall firewall add rule name=""Vitakora Server"" dir=in action=allow protocol=TCP localport=5000"; Flags: runhidden waituntilterminated
+          Filename: "{cmd}"; Parameters: "/C schtasks /Delete /TN ""Vitakora Server"" /F >nul 2>&1"; Flags: runhidden waituntilterminated
+          Filename: "{cmd}"; Parameters: "/C schtasks /Create /TN ""Vitakora Server"" /TR """"""{app}\Server\Vitakora.Server.exe"""""" /SC ONSTART /RU SYSTEM /RL HIGHEST /F"; Flags: runhidden waituntilterminated
+          Filename: "{cmd}"; Parameters: "/C schtasks /Run /TN ""Vitakora Server"""; Flags: runhidden waituntilterminated
+          Filename: "{app}\Client\Vitakora.Client.exe"; Description: "Abrir Vitakora"; Flags: nowait postinstall skipifsilent
+
+          [UninstallRun]
+          Filename: "{cmd}"; Parameters: "/C schtasks /End /TN ""Vitakora Server"" >nul 2>&1 & schtasks /Delete /TN ""Vitakora Server"" /F >nul 2>&1 & netsh advfirewall firewall delete rule name=""Vitakora Server"" >nul 2>&1"; Flags: runhidden waituntilterminated
+          '@ | Set-Content installer\Vitakora.iss -NoNewline
+
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Vitakora.iss
+
+      - name: Package portable builds
         shell: pwsh
         run: |
           Compress-Archive -Path out/client/* -DestinationPath out/Vitakora-Client-win-x64.zip -Force
           Compress-Archive -Path out/server/* -DestinationPath out/Vitakora-Server-win-x64.zip -Force
 
-      - name: Upload client
+      - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: Vitakora-Client-win-x64
-          path: out/Vitakora-Client-win-x64.zip
+          name: Vitakora-Setup
+          path: out/Vitakora-Setup.exe
           if-no-files-found: error
 
-      - name: Upload server
+      - name: Upload portable builds
         uses: actions/upload-artifact@v4
         with:
-          name: Vitakora-Server-win-x64
-          path: out/Vitakora-Server-win-x64.zip
+          name: Vitakora-Portable
+          path: |
+            out/Vitakora-Client-win-x64.zip
+            out/Vitakora-Server-win-x64.zip
           if-no-files-found: error
