@@ -16,21 +16,53 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Extract source
+      - name: Reconstruct base source
         shell: pwsh
         run: |
+          $parts = Get-ChildItem build/source.part*.b64 | Sort-Object Name
+          $base64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\vitakora-source.zip", [Convert]::FromBase64String($base64))
           New-Item -ItemType Directory -Force -Path source | Out-Null
-          Expand-Archive build/source.zip source -Force
+          Expand-Archive "$env:RUNNER_TEMP\vitakora-source.zip" source -Force
+
+      - name: Apply current patches
+        shell: pwsh
+        run: |
+          Copy-Item patches\* source -Recurse -Force
 
       - name: Install .NET 10 SDK
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
 
-      - name: Build Vitakora
+      - name: Restore and build
         shell: pwsh
         working-directory: source
-        run: .\build-windows.ps1
+        run: |
+          dotnet restore Vitakora.slnx
+          dotnet build Vitakora.slnx -c Release --no-restore
+
+      - name: Publish
+        shell: pwsh
+        working-directory: source
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          dotnet publish src/Vitakora.Client/Vitakora.Client.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:DebugType=None -p:DebugSymbols=false -o out/client
+          dotnet publish src/Vitakora.Server/Vitakora.Server.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:DebugType=None -p:DebugSymbols=false -o out/server
+
+      - name: Build installers
+        shell: pwsh
+        working-directory: source
+        run: |
+          choco install innosetup -y --no-progress
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Server.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Client.iss
 
       - name: Upload server installer
         uses: actions/upload-artifact@v4
