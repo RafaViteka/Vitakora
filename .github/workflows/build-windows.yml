@@ -1,0 +1,87 @@
+name: Build Vitakora Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Reconstruct source package
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem build/source.part*.b64 | Sort-Object Name
+          $base64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\vitakora-source.zip", [Convert]::FromBase64String($base64))
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\source" | Out-Null
+          Expand-Archive "$env:RUNNER_TEMP\vitakora-source.zip" "$env:GITHUB_WORKSPACE\source" -Force
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        working-directory: source
+        run: dotnet restore Vitakora.slnx
+
+      - name: Build
+        working-directory: source
+        run: dotnet build Vitakora.slnx -c Release --no-restore
+
+      - name: Publish Windows client
+        shell: pwsh
+        working-directory: source
+        run: |
+          dotnet publish src/Vitakora.Client/Vitakora.Client.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:DebugType=None `
+            -p:DebugSymbols=false `
+            -o ../out/client
+
+      - name: Publish Windows server
+        shell: pwsh
+        working-directory: source
+        run: |
+          dotnet publish src/Vitakora.Server/Vitakora.Server.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:DebugType=None `
+            -p:DebugSymbols=false `
+            -o ../out/server
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path out/client/* -DestinationPath out/Vitakora-Client-win-x64.zip -Force
+          Compress-Archive -Path out/server/* -DestinationPath out/Vitakora-Server-win-x64.zip -Force
+
+      - name: Upload client
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vitakora-Client-win-x64
+          path: out/Vitakora-Client-win-x64.zip
+          if-no-files-found: error
+
+      - name: Upload server
+        uses: actions/upload-artifact@v4
+        with:
+          name: Vitakora-Server-win-x64
+          path: out/Vitakora-Server-win-x64.zip
+          if-no-files-found: error
