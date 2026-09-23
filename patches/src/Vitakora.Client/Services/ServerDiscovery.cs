@@ -22,8 +22,16 @@ public static class ServerDiscovery
         if (saved is not null && await IsVitakoraAsync(saved, cancellationToken))
             return saved;
 
-        if (await IsVitakoraAsync("http://localhost:5000", cancellationToken))
-            return "http://localhost:5000";
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            if (await IsVitakoraAsync("http://localhost:5000", cancellationToken))
+            {
+                Save("http://localhost:5000");
+                return "http://localhost:5000";
+            }
+
+            await Task.Delay(500, cancellationToken);
+        }
 
         try
         {
@@ -32,7 +40,7 @@ public static class ServerDiscovery
             await udp.SendAsync(payload, payload.Length, new IPEndPoint(IPAddress.Broadcast, DiscoveryPort));
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(3));
+            timeout.CancelAfter(TimeSpan.FromSeconds(4));
 
             while (!timeout.IsCancellationRequested)
             {
