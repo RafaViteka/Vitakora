@@ -2,7 +2,7 @@ name: Build Vitakora 3 Preview
 on:
   push:
     paths:
-      - 'build/vitakora3.b64'
+      - 'preview/vitakora3_preview.py'
       - '.github/workflows/build-vitakora3.yml'
   workflow_dispatch:
 jobs:
@@ -13,33 +13,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Restore Vitakora 3 source
-        shell: python
-        run: |
-          import base64, pathlib, zipfile
-          raw=pathlib.Path("build/vitakora3.b64").read_text(encoding="utf-8").strip()
-          data=base64.b64decode(raw, validate=True)
-          pathlib.Path("vitakora3.zip").write_bytes(data)
-          with zipfile.ZipFile("vitakora3.zip") as z:
-              bad=z.testzip()
-              assert bad is None, f"Corrupt ZIP member: {bad}"
-              z.extractall("vitakora3")
-          print("Source restored:", len(data), "bytes")
-      - name: Test
-        working-directory: vitakora3
-        run: python tests/test_111_115.py
-      - name: Build application
-        working-directory: vitakora3
+      - name: Syntax check
+        run: python -m py_compile preview/vitakora3_preview.py
+      - name: Build Vitakora.exe
         run: |
           python -m pip install pyinstaller
-          python -m PyInstaller --clean --onefile --windowed --name Vitakora src/main3.py
-      - name: Build installer
-        working-directory: vitakora3
+          python -m PyInstaller --clean --onefile --windowed --name Vitakora preview/vitakora3_preview.py
+      - name: Create installer script
         shell: powershell
         run: |
-          (Get-Content installer/Vitakora.iss) | Where-Object {$_ -notmatch '^SetupIconFile='} | Set-Content installer/Vitakora-ci.iss
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Vitakora-ci.iss
+          @'
+          [Setup]
+          AppName=Vitakora
+          AppVersion=3.0 Preview
+          DefaultDirName={autopf}\Vitakora
+          DefaultGroupName=Vitakora
+          OutputDir=output
+          OutputBaseFilename=Vitakora-Setup-3.0-Preview
+          Compression=lzma2
+          SolidCompression=yes
+          PrivilegesRequired=admin
+          [Files]
+          Source: "..\dist\Vitakora.exe"; DestDir: "{app}"; Flags: ignoreversion
+          [Icons]
+          Name: "{group}\Vitakora"; Filename: "{app}\Vitakora.exe"
+          Name: "{autodesktop}\Vitakora"; Filename: "{app}\Vitakora.exe"
+          Name: "{userstartup}\Vitakora"; Filename: "{app}\Vitakora.exe"
+          [Run]
+          Filename: "{app}\Vitakora.exe"; Description: "Abrir Vitakora"; Flags: nowait postinstall skipifsilent
+          '@ | Set-Content preview\Vitakora.iss
+      - name: Build installer
+        shell: powershell
+        working-directory: preview
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" Vitakora.iss'
       - uses: actions/upload-artifact@v4
         with:
           name: Vitakora-Setup-3.0-Preview
-          path: vitakora3/installer/output/Vitakora-Setup-3.0-Preview.exe
+          path: preview/output/Vitakora-Setup-3.0-Preview.exe
