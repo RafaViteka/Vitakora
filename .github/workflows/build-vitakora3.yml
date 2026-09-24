@@ -14,10 +14,17 @@ jobs:
         with:
           python-version: '3.12'
       - name: Restore Vitakora 3 source
-        shell: powershell
+        shell: python
         run: |
-          [IO.File]::WriteAllBytes("vitakora3.zip",[Convert]::FromBase64String((Get-Content build/vitakora3.b64 -Raw)))
-          Expand-Archive vitakora3.zip -DestinationPath vitakora3
+          import base64, pathlib, zipfile
+          raw=pathlib.Path("build/vitakora3.b64").read_text(encoding="utf-8").strip()
+          data=base64.b64decode(raw, validate=True)
+          pathlib.Path("vitakora3.zip").write_bytes(data)
+          with zipfile.ZipFile("vitakora3.zip") as z:
+              bad=z.testzip()
+              assert bad is None, f"Corrupt ZIP member: {bad}"
+              z.extractall("vitakora3")
+          print("Source restored:", len(data), "bytes")
       - name: Test
         working-directory: vitakora3
         run: python tests/test_111_115.py
