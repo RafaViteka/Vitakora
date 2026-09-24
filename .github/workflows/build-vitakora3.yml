@@ -1,0 +1,38 @@
+name: Build Vitakora 3 Preview
+on:
+  push:
+    paths:
+      - 'build/vitakora3.b64'
+      - '.github/workflows/build-vitakora3.yml'
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Restore Vitakora 3 source
+        shell: powershell
+        run: |
+          [IO.File]::WriteAllBytes("vitakora3.zip",[Convert]::FromBase64String((Get-Content build/vitakora3.b64 -Raw)))
+          Expand-Archive vitakora3.zip -DestinationPath vitakora3
+      - name: Test
+        working-directory: vitakora3
+        run: python tests/test_111_115.py
+      - name: Build application
+        working-directory: vitakora3
+        run: |
+          python -m pip install pyinstaller
+          python -m PyInstaller --clean --onefile --windowed --name Vitakora src/main3.py
+      - name: Build installer
+        working-directory: vitakora3
+        shell: powershell
+        run: |
+          (Get-Content installer/Vitakora.iss) | Where-Object {$_ -notmatch '^SetupIconFile='} | Set-Content installer/Vitakora-ci.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\Vitakora-ci.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Vitakora-Setup-3.0-Preview
+          path: vitakora3/installer/output/Vitakora-Setup-3.0-Preview.exe
