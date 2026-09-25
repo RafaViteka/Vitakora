@@ -55,7 +55,7 @@ class App(tk.Tk):
         super().__init__();self.title("Vitakora 3.0 Preview");self.geometry("1100x700");self.minsize(850,550)
         self.cfg=loadcfg()
         if not self.cfg:self.first()
-        self.server=None;self.host=self.cfg.get("server_ip","127.0.0.1")
+        self.server=None;self.host=self.cfg.get("server_ip","")
         if self.cfg.get("mode")=="principal":
             try:self.server=Server(self.receive);self.server.start();self.host="127.0.0.1"
             except Exception as e:messagebox.showerror("Vitakora","No se pudo iniciar el puesto principal:\n"+str(e))
@@ -73,7 +73,8 @@ class App(tk.Tk):
         self.status=ttk.Label(top,text="Conectando...");self.status.pack(side="right")
         body=ttk.Frame(self);body.pack(fill="both",expand=True)
         nav=ttk.Frame(body,padding=16,style="Nav.TFrame");nav.pack(side="left",fill="y")
-        for x in ["Chats","Canales","Programados","Plantillas","Adjuntos","Usuarios","Equipos","Configuración","Registro"]:ttk.Label(nav,text=x,padding=(8,10)).pack(anchor="w")
+        for x in ["Chats","Canales","Programados","Plantillas","Adjuntos","Usuarios","Equipos","Registro"]:ttk.Label(nav,text=x,padding=(8,10)).pack(anchor="w")
+        ttk.Button(nav,text="Reconfigurar equipo",command=self.reconfigure).pack(anchor="w",fill="x",pady=(18,0))
         main=ttk.Frame(body,padding=20);main.pack(side="left",fill="both",expand=True)
         ttk.Label(main,text="Atención al cliente",font=("Segoe UI",16,"bold")).pack(anchor="w")
         self.chat=tk.Text(main,wrap="word",state="disabled",font=("Segoe UI",11),relief="flat");self.chat.pack(fill="both",expand=True,pady=15)
@@ -83,7 +84,15 @@ class App(tk.Tk):
     def auto(self):
         if not self.host:self.host=discover() or ""
     def update_status(self):
-        self.status.config(text=("● Principal" if self.cfg.get("mode")=="principal" else ("● Conectado a "+self.host if self.host else "○ Buscando principal")))
+        if self.cfg.get("mode")=="principal":
+            label="● Principal activo"
+        elif self.probe():
+            label="● Conectado a "+self.host
+        elif self.host:
+            label="○ Sin conexión ("+self.host+")"
+        else:
+            label="○ Buscando puesto principal"
+        self.status.config(text=label)
         self.after(2000,self.update_status)
     def load_history(self):
         with db() as d:rows=d.execute("select sender,body,created from messages order by created limit 200").fetchall()
