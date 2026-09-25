@@ -81,8 +81,36 @@ class App(tk.Tk):
         row=ttk.Frame(main);row.pack(fill="x");self.entry=ttk.Entry(row,font=("Segoe UI",11));self.entry.pack(side="left",fill="x",expand=True,padx=(0,10));self.entry.bind("<Return>",lambda e:self.go())
         ttk.Button(row,text="Enviar",command=self.go).pack(side="right")
         self.after(300,self.update_status)
+    def reconfigure(self):
+        if messagebox.askyesno("Vitakora","¿Reconfigurar este equipo? La aplicación se cerrará para aplicar el cambio."):
+            try:
+                if CFG.exists(): CFG.unlink()
+            except Exception:
+                pass
+            self.destroy()
+    def probe(self):
+        if not self.host:
+            return False
+        try:
+            c=socket.create_connection((self.host,TCP),0.5)
+            c.close()
+            return True
+        except OSError:
+            return False
     def auto(self):
-        if not self.host:self.host=discover() or ""
+        import time
+        while True:
+            try:
+                if not self.winfo_exists(): return
+                if not self.probe():
+                    found=discover(2)
+                    if found:
+                        self.host=found
+                        self.cfg["server_ip"]=found
+                        savecfg(self.cfg)
+                time.sleep(2)
+            except Exception:
+                time.sleep(2)
     def update_status(self):
         if self.cfg.get("mode")=="principal":
             label="● Principal activo"
@@ -104,9 +132,9 @@ class App(tk.Tk):
         body=self.entry.get().strip()
         if not body:return
         if not self.host:messagebox.showwarning("Vitakora","No se ha encontrado el puesto principal.");return
-        self.entry.delete(0,"end")
         try:
             r=send(self.host,self.cfg.get("user","Puesto"),body)
+            self.entry.delete(0,"end")
             if self.cfg.get("mode")!="principal":self.add(self.cfg.get("user","Yo"),body)
         except Exception as e:messagebox.showerror("Vitakora","No se pudo enviar el mensaje:\n"+str(e))
 if __name__=="__main__":App().mainloop()
